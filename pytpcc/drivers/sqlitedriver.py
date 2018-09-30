@@ -102,6 +102,9 @@ TXN_QUERIES = {
 ## SqliteDriver
 ## ==============================================
 class SqliteDriver(AbstractDriver):
+
+    read = 0
+    write = 0
     DEFAULT_CONFIG = {
         "database": ("The path to the SQLite database", "/tmp/tpcc.db" ),
     }
@@ -175,6 +178,7 @@ class SqliteDriver(AbstractDriver):
         result = [ ]
         for d_id in range(1, constants.DISTRICTS_PER_WAREHOUSE+1):
             self.cursor.execute(q["getNewOrder"], [d_id, w_id])
+            self.read+=1;
             newOrder = self.cursor.fetchone()
             if newOrder == None:
                 ## No orders for this district: skip it. Note: This must be reported if > 1%
@@ -183,14 +187,19 @@ class SqliteDriver(AbstractDriver):
             no_o_id = newOrder[0]
             
             self.cursor.execute(q["getCId"], [no_o_id, d_id, w_id])
+            self.read+=1
             c_id = self.cursor.fetchone()[0]
             
             self.cursor.execute(q["sumOLAmount"], [no_o_id, d_id, w_id])
+            self.read+=1
             ol_total = self.cursor.fetchone()[0]
 
             self.cursor.execute(q["deleteNewOrder"], [d_id, w_id, no_o_id])
+            self.write+=1
             self.cursor.execute(q["updateOrders"], [o_carrier_id, no_o_id, d_id, w_id])
+            self.write+=1
             self.cursor.execute(q["updateOrderLine"], [ol_delivery_d, no_o_id, d_id, w_id])
+            self.write+=1
 
             # These must be logged in the "result file" according to TPC-C 2.7.2.2 (page 39)
             # We remove the queued time, completed time, w_id, and o_carrier_id: the client can figure
@@ -200,11 +209,13 @@ class SqliteDriver(AbstractDriver):
             assert ol_total > 0.0
 
             self.cursor.execute(q["updateCustomer"], [ol_total, c_id, d_id, w_id])
+            self.write+=1
 
             result.append((d_id, no_o_id))
         ## FOR
 
         self.conn.commit()
+        print("r:"+str(self.read)+" w:"+str(self.write))
         return result
 
     ## ----------------------------------------------
@@ -231,6 +242,7 @@ class SqliteDriver(AbstractDriver):
             ## Determine if this is an all local order or not
             all_local = all_local and i_w_ids[i] == w_id
             self.cursor.execute(q["getItemInfo"], [i_ids[i]])
+            self.read+=1
             items.append(self.cursor.fetchone())
         assert len(items) == len(i_ids)
         
@@ -246,14 +258,17 @@ class SqliteDriver(AbstractDriver):
         ## Collect Information from WAREHOUSE, DISTRICT, and CUSTOMER
         ## ----------------
         self.cursor.execute(q["getWarehouseTaxRate"], [w_id])
+        self.read+=1
         w_tax = self.cursor.fetchone()[0]
         
         self.cursor.execute(q["getDistrict"], [d_id, w_id])
+        self.read+=1
         district_info = self.cursor.fetchone()
         d_tax = district_info[0]
         d_next_o_id = district_info[1]
         
         self.cursor.execute(q["getCustomer"], [w_id, d_id, c_id])
+        self.read+=1
         customer_info = self.cursor.fetchone()
         c_discount = customer_info[0]
 
@@ -264,8 +279,11 @@ class SqliteDriver(AbstractDriver):
         o_carrier_id = constants.NULL_CARRIER_ID
         
         self.cursor.execute(q["incrementNextOrderId"], [d_next_o_id + 1, d_id, w_id])
+        self.write+=1
         self.cursor.execute(q["createOrder"], [d_next_o_id, d_id, w_id, c_id, o_entry_d, o_carrier_id, ol_cnt, all_local])
+        self.write+=1
         self.cursor.execute(q["createNewOrder"], [d_next_o_id, d_id, w_id])
+        self.write+=1
 
         ## ----------------
         ## Insert Order Item Information
@@ -284,6 +302,7 @@ class SqliteDriver(AbstractDriver):
             i_price = itemInfo[0]
 
             self.cursor.execute(q["getStockInfo"] % (d_id), [ol_i_id, ol_supply_w_id])
+            self.read+=1
             stockInfo = self.cursor.fetchone()
             if len(stockInfo) == 0:
                 logging.warn("No STOCK record for (ol_i_id=%d, ol_supply_w_id=%d)" % (ol_i_id, ol_supply_w_id))
@@ -306,7 +325,7 @@ class SqliteDriver(AbstractDriver):
             if ol_supply_w_id != w_id: s_remote_cnt += 1
 
             self.cursor.execute(q["updateStock"], [s_quantity, s_ytd, s_order_cnt, s_remote_cnt, ol_i_id, ol_supply_w_id])
-
+            self.write+=1
             if i_data.find(constants.ORIGINAL_STRING) != -1 and s_data.find(constants.ORIGINAL_STRING) != -1:
                 brand_generic = 'B'
             else:
@@ -317,7 +336,7 @@ class SqliteDriver(AbstractDriver):
             total += ol_amount
 
             self.cursor.execute(q["createOrderLine"], [d_next_o_id, d_id, w_id, ol_number, ol_i_id, ol_supply_w_id, o_entry_d, ol_quantity, ol_amount, s_dist_xx])
-
+            self.write+=1
             ## Add the info to be returned
             item_data.append( (i_name, s_quantity, brand_generic, i_price, ol_amount) )
         ## FOR
@@ -333,8 +352,10 @@ class SqliteDriver(AbstractDriver):
 
         ## Pack up values the client is missing (see TPC-C 2.4.3.5)
         misc = [ (w_tax, d_tax, d_next_o_id, total) ]
+        print("r:"+str(self.read)+" w:"+str(self.write))
         
         return [ customer_info, misc, item_data ]
+
 
     ## ----------------------------------------------
     ## doOrderStatus
@@ -352,10 +373,12 @@ class SqliteDriver(AbstractDriver):
 
         if c_id != None:
             self.cursor.execute(q["getCustomerByCustomerId"], [w_id, d_id, c_id])
+            self.read+=1
             customer = self.cursor.fetchone()
         else:
             # Get the midpoint customer's id
             self.cursor.execute(q["getCustomersByLastName"], [w_id, d_id, c_last])
+            self.read+=1
             all_customers = self.cursor.fetchall()
             assert len(all_customers) > 0
             namecnt = len(all_customers)
@@ -366,14 +389,17 @@ class SqliteDriver(AbstractDriver):
         assert c_id != None
 
         self.cursor.execute(q["getLastOrder"], [w_id, d_id, c_id])
+        self.read+=1
         order = self.cursor.fetchone()
         if order:
             self.cursor.execute(q["getOrderLines"], [w_id, d_id, order[0]])
+            self.read+=1
             orderLines = self.cursor.fetchall()
         else:
             orderLines = [ ]
 
         self.conn.commit()
+        print("r:"+str(self.read)+" w:"+str(self.write))
         return [ customer, order, orderLines ]
 
     ## ----------------------------------------------
@@ -393,10 +419,12 @@ class SqliteDriver(AbstractDriver):
 
         if c_id != None:
             self.cursor.execute(q["getCustomerByCustomerId"], [w_id, d_id, c_id])
+            self.read+=1
             customer = self.cursor.fetchone()
         else:
             # Get the midpoint customer's id
             self.cursor.execute(q["getCustomersByLastName"], [w_id, d_id, c_last])
+            self.read+=1
             all_customers = self.cursor.fetchall()
             assert len(all_customers) > 0
             namecnt = len(all_customers)
@@ -410,13 +438,17 @@ class SqliteDriver(AbstractDriver):
         c_data = customer[17]
 
         self.cursor.execute(q["getWarehouse"], [w_id])
+        self.read+=1
         warehouse = self.cursor.fetchone()
         
         self.cursor.execute(q["getDistrict"], [w_id, d_id])
+        self.read+=1
         district = self.cursor.fetchone()
         
         self.cursor.execute(q["updateWarehouseBalance"], [h_amount, w_id])
+        self.write+=1
         self.cursor.execute(q["updateDistrictBalance"], [h_amount, w_id, d_id])
+        self.write+=1
 
         # Customer Credit Information
         if customer[11] == constants.BAD_CREDIT:
@@ -424,15 +456,16 @@ class SqliteDriver(AbstractDriver):
             c_data = (newData + "|" + c_data)
             if len(c_data) > constants.MAX_C_DATA: c_data = c_data[:constants.MAX_C_DATA]
             self.cursor.execute(q["updateBCCustomer"], [c_balance, c_ytd_payment, c_payment_cnt, c_data, c_w_id, c_d_id, c_id])
+            self.write+=1
         else:
             c_data = ""
             self.cursor.execute(q["updateGCCustomer"], [c_balance, c_ytd_payment, c_payment_cnt, c_w_id, c_d_id, c_id])
-
+            self.write+=1
         # Concatenate w_name, four spaces, d_name
         h_data = "%s    %s" % (warehouse[0], district[0])
         # Create the history record
         self.cursor.execute(q["insertHistory"], [c_id, c_d_id, c_w_id, d_id, w_id, h_date, h_amount, h_data])
-
+        self.write+=1
         self.conn.commit()
 
         # TPC-C 2.5.3.3: Must display the following fields:
@@ -443,6 +476,7 @@ class SqliteDriver(AbstractDriver):
         # H_AMOUNT, and H_DATE.
 
         # Hand back all the warehouse, district, and customer data
+        print("r:"+str(self.read)+" w:"+str(self.write))
         return [ warehouse, district, customer ]
         
     ## ----------------------------------------------
@@ -456,14 +490,18 @@ class SqliteDriver(AbstractDriver):
         threshold = params["threshold"]
         
         self.cursor.execute(q["getOId"], [w_id, d_id])
+        self.read+=1
         result = self.cursor.fetchone()
         assert result
         o_id = result[0]
         
         self.cursor.execute(q["getStockCount"], [w_id, d_id, o_id, (o_id - 20), w_id, threshold])
+        self.read+=1
         result = self.cursor.fetchone()
         
         self.conn.commit()
+
+        print("r:"+str(self.read)+" w:"+str(self.write))
         
         return int(result[0])
         
